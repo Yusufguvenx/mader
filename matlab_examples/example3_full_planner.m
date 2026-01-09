@@ -178,14 +178,14 @@ params.a_max = [3.0; 3.0; 3.0];        % Max acceleration [m/s^2]
 params.j_max = [10.0; 10.0; 10.0];     % Max jerk [m/s^3]
 
 % Trajectory parameters
-params.num_pol = 4;                     % Number of polynomial segments
+params.num_pol = 8;                     % Number of polynomial segments
 params.deg_pol = 3;                     % Polynomial degree (cubic)
 params.weight = 100.0;                  % Terminal cost weight
 
 % Planning parameters
 params.Ra = 6.0;                        % Planning radius [m]
 params.dc = 0.02;                       % Sampling period [s]
-params.drone_radius = 0.3;              % Drone collision radius [m]
+params.drone_radius = 0.20;              % Drone collision radius [m]
 
 % A* search parameters (simplified from octopus_search settings)
 params.a_star_samples = [5, 5, 3];      % Grid samples per axis
@@ -206,7 +206,7 @@ initial_state.pos = [-4; 0; 0];
 initial_state.vel = [0; 0; 0];
 initial_state.accel = [0; 0; 0];
 
-final_goal = [4; 0; 0];                 % Final goal position
+final_goal = [6; 2; 1];               % Final goal position
 
 fprintf('Initial position: [%.1f, %.1f, %.1f]\n', initial_state.pos);
 fprintf('Final goal:       [%.1f, %.1f, %.1f]\n', final_goal);
@@ -256,6 +256,17 @@ obs3_center = [2; -1.2; 0];
 obs3_size = [1.2; 0.8; 2.0];
 obstacles{3} = createBoxVertices(obs3_center, obs3_size);
 
+% Obstacle 4: New box
+obs4_center = [1.0; 2.0; 0.0];
+obs4_size   = [1.0; 0.8; 1.5];
+obstacles{4} = createBoxVertices(obs4_center, obs4_size);
+
+% Obstacle 5: Another box
+obs5_center = [-3.0; -1.5; 0.0];
+obs5_size   = [1.2; 1.2; 2.0];
+obstacles{5} = createBoxVertices(obs5_center, obs5_size);
+
+
 fprintf('  Created %d obstacles\n', length(obstacles));
 
 % Inflate obstacles by drone radius (Minkowski sum approximation)
@@ -265,6 +276,14 @@ for i = 1:length(obstacles)
     obstacles_inflated{i} = inflateObstacle(obstacles{i}, params.drone_radius);
 end
 fprintf('  Inflated by drone_radius = %.2f m\n\n', params.drone_radius);
+
+% Axis-aligned box bounds for distance constraints
+obstacle_boxes = cell(size(obstacles));
+for i = 1:length(obstacles)
+    obs_min = min(obstacles{i}, [], 2);
+    obs_max = max(obstacles{i}, [], 2);
+    obstacle_boxes{i} = [obs_min, obs_max];
+end
 
 %% 4. B-Spline Setup
 % ------------------
@@ -278,7 +297,7 @@ N = M - p - 1;
 % Time allocation
 dist = norm(final_state.pos - initial_state.pos);
 t_init = 0;
-t_final = dist / mean(params.v_max) * 2.0;
+t_final = dist / mean(params.v_max) * 3.0;
 deltaT = (t_final - t_init) / num_segments;
 
 % Knot vector (clamped uniform B-spline)
@@ -415,7 +434,8 @@ objFun = @(x) objectiveFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
 
 conFun = @(x) constraintFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
     knots, N, p, num_segments, params.v_max, params.a_max, params.j_max, ...
-    params.Ra, deltaT, A_pos_bs, planes_n, planes_d, obstacles_inflated);
+    params.Ra, deltaT, A_pos_bs, obstacle_boxes, params.drone_radius);
+
 
 tic;
 [x_opt, fval, exitflag, output] = fmincon(objFun, x0, [], [], [], [], [], [], conFun, options);
@@ -1019,9 +1039,10 @@ function cost = objectiveFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
 end
 
 function [c, ceq] = constraintFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
-                                        knots, N, p, num_segments, ...
-                                        v_max, a_max, j_max, Ra, deltaT, A_pos_bs, ...
-                                        planes_n, planes_d, obstacles)
+    knots, N, p, num_segments, v_max, a_max, j_max, Ra, deltaT, A_pos_bs, ...
+    obstacle_boxes, drone_radius)
+
+
     num_free = length(x) / 3;
     q_free = reshape(x, 3, num_free);
     q = [q0, q1, q2, q_free, qNm2, qNm1, qN];
@@ -1064,18 +1085,19 @@ function [c, ceq] = constraintFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
     end
 
     % Collision constraints (separating planes)
-    plane_idx = 0;
-    margin = 0.1;
+% Collision constraints (sample points vs axis-aligned boxes)
+    u_samples = [0.2, 0.5, 0.8];
     for seg = 1:num_segments
-        for obs_idx = 1:length(obstacles)
-            plane_idx = plane_idx + 1;
-            if plane_idx <= length(planes_n)
-                n = planes_n{plane_idx};
-                d = planes_d(plane_idx);
-                for j = 0:3
-                    cp = q(:, seg + j);
-                    c = [c; -(dot(n, cp) + d - margin)];
-                end
+        Qi = q(:, seg:seg+3);
+        coeff = Qi * A_pos_bs; % 3x4 coefficients for u_vec=[u^3;u^2;u;1]
+        for u = u_samples
+            u_vec = [u^3; u^2; u; 1];
+            pt = coeff * u_vec;
+            for obs_idx = 1:length(obstacle_boxes)
+                obs_min = obstacle_boxes{obs_idx}(:,1);
+                obs_max = obstacle_boxes{obs_idx}(:,2);
+                d = max([obs_min - pt, zeros(3,1), pt - obs_max], [], 2);
+                c = [c; (drone_radius^2 - sum(d.^2))];
             end
         end
     end

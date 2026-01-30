@@ -1,34 +1,6 @@
-%% MADER MATLAB Example 2: Trajectory Optimization
+%% MADER MATLAB Example 2 (Gurobi): Trajectory Optimization
 % =========================================================================
-% This script demonstrates trajectory optimization as used in MADER.
-% Converted from the C++ implementation in mader/src/solver_gurobi.cpp
-%
-% KEY CONCEPT: LOCAL PLANNING with PLANNING HORIZON Ra
-% ----------------------------------------------------
-% MADER uses a LOCAL planning approach with radius Ra:
-%   - Ra defines the "planning horizon" (how far ahead we plan)
-%   - If the goal is WITHIN Ra: plan directly to goal
-%   - If the goal is OUTSIDE Ra: plan to an INTERMEDIATE goal G on the
-%     boundary of the Ra sphere, in the direction of the final goal
-%
-% This is crucial because:
-%   1. Local planning is computationally faster
-%   2. Re-planning handles dynamic obstacles
-%   3. The trajectory stays within a known safe region
-%
-% OPTIMIZATION PROBLEM:
-%   minimize:   control_cost (jerk^2) + weight * terminal_cost
-%   subject to:
-%     - Initial conditions (pos, vel, accel)
-%     - Final conditions (pos, vel=0, accel=0)
-%     - Velocity limits: |v| <= v_max per axis
-%     - Acceleration limits: |a| <= a_max per axis
-%     - Jerk limits: |j| <= j_max per axis
-%     - Sphere constraint: all control points within Ra of start
-%
-% Author: Converted from MIT ACL MADER project
-% Reference: Jesus Tordesillas, et al. "MADER: Trajectory Planner" IEEE T-RO 2021
-% =========================================================================
+
 
 clear; clc; close all;
 
@@ -42,9 +14,9 @@ params.deg_pol = 3;                     % Polynomial degree (cubic)
 params.weight = 100.0;                  % Weight for terminal cost
 params.Ra = 4.0;                        % Planning radius (sphere constraint)
 params.dc = 0.01;                       % Time discretization
-params.goal_radius = 0.1;              % Tolerance to consider goal reached
+params.goal_radius = 0.1;               % Tolerance to consider goal reached
 
-fprintf('=== MADER Trajectory Optimization (Example 2) ===\n\n');
+fprintf('=== MADER Trajectory Optimization (Example 2, Gurobi) ===\n\n');
 fprintf('Parameters:\n');
 fprintf('  v_max: [%.1f, %.1f, %.1f] m/s\n', params.v_max);
 fprintf('  a_max: [%.1f, %.1f, %.1f] m/s^2\n', params.a_max);
@@ -53,8 +25,6 @@ fprintf('  Number of segments: %d\n', params.num_pol);
 fprintf('  Planning radius Ra: %.1f m\n\n', params.Ra);
 
 %% 2. Define Initial State and FINAL Goal
-% The final goal may be far away; we'll compute intermediate goal if needed
-
 initial_state = struct();
 initial_state.pos = [0; 0; 0];         % Start at origin
 initial_state.vel = [0.5; 0; 0];       % Moving in +X direction
@@ -71,16 +41,9 @@ dist_to_goal = norm(final_goal - initial_state.pos);
 fprintf('Distance to goal: %.2f m\n', dist_to_goal);
 
 %% 3. Compute INTERMEDIATE Goal (if needed)
-% =========================================================================
-% THIS IS THE KEY MADER CONCEPT!
-% If goal is outside planning sphere, compute intermediate goal G on the
-% boundary of the sphere, in the direction of the final goal.
-% =========================================================================
-
 if dist_to_goal > params.Ra
-    % Goal is outside Ra -> compute intermediate goal G
     direction = (final_goal - initial_state.pos) / dist_to_goal;
-    intermediate_goal = initial_state.pos + params.Ra * 0.95 * direction;  % 0.95 for margin
+    intermediate_goal = initial_state.pos + params.Ra * 0.95 * direction;
 
     fprintf('\n*** Goal is OUTSIDE planning radius Ra! ***\n');
     fprintf('Computing intermediate goal G within Ra...\n');
@@ -91,26 +54,21 @@ if dist_to_goal > params.Ra
     target_goal = intermediate_goal;
     goal_type = 'INTERMEDIATE';
 else
-    % Goal is within Ra -> plan directly to goal
     fprintf('\nGoal is WITHIN planning radius Ra. Planning directly to goal.\n\n');
     target_goal = final_goal;
     goal_type = 'FINAL';
 end
 
-% Final state for this planning iteration
 final_state = struct();
 final_state.pos = target_goal;
-final_state.vel = [0; 0; 0];           % Stop at intermediate/final goal
+final_state.vel = [0; 0; 0];
 final_state.accel = [0; 0; 0];
 
 %% 4. Compute B-Spline Parameters
-% Following the notation from solver_gurobi.cpp:
-% p = degree, M = num_pol + 2*p, N = M - p - 1
-
 p = params.deg_pol;
 num_segments = params.num_pol;
-M = num_segments + 2 * p;  % Total number of knots - 1
-N = M - p - 1;             % Number of control points - 1
+M = num_segments + 2 * p;
+N = M - p - 1;
 
 fprintf('B-spline setup:\n');
 fprintf('  Degree p = %d\n', p);
@@ -118,15 +76,11 @@ fprintf('  N+1 control points = %d\n', N + 1);
 fprintf('  %d polynomial segments\n\n', num_segments);
 
 %% 5. Set Up Time Allocation and Knot Vector
-% Time allocation based on distance and max velocity
 dist = norm(target_goal - initial_state.pos);
 t_init = 0;
-t_final = dist / mean(params.v_max) * 1.5;  % Conservative time estimate
-
-% Compute deltaT (uniform knot spacing)
+t_final = dist / mean(params.v_max) * 1.5;
 deltaT = (t_final - t_init) / num_segments;
 
-% Build clamped uniform B-spline knot vector
 knots = zeros(1, M + 1);
 knots(1:p+1) = t_init;
 for i = p+2 : M-p
@@ -139,13 +93,6 @@ fprintf('  t_init = %.2f s, t_final = %.2f s\n', t_init, t_final);
 fprintf('  deltaT = %.3f s\n\n', deltaT);
 
 %% 6. Compute Fixed Control Points from Initial/Final Conditions
-% From solver_gurobi.cpp lines 589-596
-% These equations enforce initial/final pos, vel, accel
-%
-% For a cubic B-spline (p=3):
-%   - First 3 control points (q0, q1, q2) are determined by initial pos/vel/accel
-%   - Last 3 control points (qN-2, qN-1, qN) are determined by final pos/vel/accel
-
 p0 = initial_state.pos;
 v0 = initial_state.vel;
 a0 = initial_state.accel;
@@ -153,26 +100,24 @@ pf = final_state.pos;
 vf = final_state.vel;
 af = final_state.accel;
 
-% Knot values needed for the formulas
-t1 = knots(2);          % knots_(1) in C++ (0-indexed)
-t2 = knots(3);          % knots_(2)
-tpP1 = knots(p+2);      % knots_(p+1)
-t1PpP1 = knots(2+p+1);  % knots_(1+p+1)
+t1 = knots(2);
+t2 = knots(3);
+tpP1 = knots(p+2);
+t1PpP1 = knots(2+p+1);
+tN = knots(N+1);
+tNm1 = knots(N);
+tNPp = knots(N+p+1);
+tNm1Pp = knots(N+p);
 
-tN = knots(N+1);        % knots_(N)
-tNm1 = knots(N);        % knots_(N-1)
-tNPp = knots(N+p+1);    % knots_(N+p)
-tNm1Pp = knots(N+p);    % knots_(N-1+p)
-
-% Fixed control points for INITIAL conditions
 q0 = p0;
 q1 = p0 + (tpP1 - t1) * v0 / p;
-q2 = (p^2 * q1 - (t1PpP1 - t2) * (a0 * (t2 - tpP1) + v0) - p * (q1 + (t2 - t1PpP1) * v0)) / ((p - 1) * p);
+q2 = (p^2 * q1 - (t1PpP1 - t2) * (a0 * (t2 - tpP1) + v0) ...
+    - p * (q1 + (t2 - t1PpP1) * v0)) / ((p - 1) * p);
 
-% Fixed control points for FINAL conditions
 qN = pf;
 qNm1 = pf + (tN - tNPp) * vf / p;
-qNm2 = (p^2 * qNm1 - (tNm1 - tNm1Pp) * (af * (tNm1Pp - tN) + vf) - p * (qNm1 + (tNm1Pp - tNm1) * vf)) / ((p - 1) * p);
+qNm2 = (p^2 * qNm1 - (tNm1 - tNm1Pp) * (af * (tNm1Pp - tN) + vf) ...
+    - p * (qNm1 + (tNm1Pp - tNm1) * vf)) / ((p - 1) * p);
 
 fprintf('Fixed control points:\n');
 fprintf('  q0  = [%.3f, %.3f, %.3f] (initial pos)\n', q0);
@@ -182,7 +127,6 @@ fprintf('  qN-2= [%.3f, %.3f, %.3f] (final accel)\n', qNm2);
 fprintf('  qN-1= [%.3f, %.3f, %.3f] (final vel)\n', qNm1);
 fprintf('  qN  = [%.3f, %.3f, %.3f] (final pos = %s goal)\n\n', qN, goal_type);
 
-% Verify all fixed points are within Ra (sanity check)
 fixed_points = [q0, q1, q2, qNm2, qNm1, qN];
 max_dist_fixed = max(vecnorm(fixed_points - q0));
 fprintf('Max distance of fixed control points from start: %.3f m\n', max_dist_fixed);
@@ -193,7 +137,6 @@ else
 end
 
 %% 7. Set Up the B-Spline Basis Matrices
-% B-spline basis matrix for uniform cubic splines
 M_bspline = (1/6) * [
     1,  4,  1, 0;
    -3,  0,  3, 0;
@@ -201,8 +144,7 @@ M_bspline = (1/6) * [
    -1,  3, -3, 1
 ];
 
-% A matrix for jerk computation (from basisConverter in mader_types.hpp)
-A_pos_bs_rest = [
+A_pos_bs = [
    -1/6,   0.5,   -0.5,   1/6;
     0.5,  -1.0,      0,   2/3;
    -0.5,   0.5,    0.5,   1/6;
@@ -210,124 +152,30 @@ A_pos_bs_rest = [
 ];
 
 %% 8. Define Optimization Variables
-% Free control points are q3, q4, ..., qN-3
-% Fixed: q0, q1, q2 (initial) and qN-2, qN-1, qN (final)
-
-num_free_cps = N + 1 - 6;  % Total CPs minus 6 fixed ones
+num_free_cps = N + 1 - 6;
 fprintf('Optimization setup:\n');
 fprintf('  Total control points: %d\n', N + 1);
 fprintf('  Fixed control points: 6 (3 initial + 3 final)\n');
 fprintf('  Free control points: %d\n', num_free_cps);
 fprintf('  Decision variables: %d (3 coords x %d free CPs)\n\n', 3 * num_free_cps, num_free_cps);
 
-%% 9. Define Cost Function
-% Cost = control_cost (jerk^2) + weight * terminal_cost (distance to goal)
-
-function cost = objectiveFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
-                                   N, num_segments, A_pos_bs, deltaT, weight, pf)
-    % Reshape decision variables to 3 x num_free matrix
-    num_free = length(x) / 3;
-    q_free = reshape(x, 3, num_free);
-
-    % Assemble all control points [q0, q1, q2, free..., qN-2, qN-1, qN]
-    q = [q0, q1, q2, q_free, qNm2, qNm1, qN];
-
-    % Control cost: sum of squared jerk over all segments
-    % Jerk = d^3/dt^3 of position = 6 * leading coefficient
-    control_cost = 0;
-    tmp = [6; 0; 0; 0];  % Multiplier to get jerk from polynomial coefficients
-
-    for i = 1:num_segments
-        Qi = q(:, i:i+3);  % 4 control points for segment i
-        A_i_times_tmp = A_pos_bs * tmp;
-
-        for axis = 1:3
-            jerk_component = Qi(axis, :) * A_i_times_tmp;
-            control_cost = control_cost + jerk_component^2;
+%% 9. Initialize and Solve with Gurobi
+if exist('gurobi', 'file') == 0
+    gurobi_home = getenv('GUROBI_HOME');
+    if ~isempty(gurobi_home)
+        gurobi_matlab = fullfile(gurobi_home, 'matlab');
+        if isfolder(gurobi_matlab)
+            addpath(gurobi_matlab);
         end
     end
-
-    % Terminal cost: squared distance from last control point to goal
-    % Note: qN = pf by construction, so this is always 0
-    % The weight helps drive intermediate CPs toward the goal direction
-    terminal_cost = norm(q(:, end) - pf)^2;
-
-    cost = control_cost + weight * terminal_cost;
-end
-
-%% 10. Define Constraint Function
-% Constraints: velocity, acceleration, jerk limits + sphere constraint
-
-function [c, ceq] = constraintFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
-                                        knots, N, p, num_segments, ...
-                                        v_max, a_max, j_max, Ra, deltaT, A_pos_bs)
-    num_free = length(x) / 3;
-    q_free = reshape(x, 3, num_free);
-    q = [q0, q1, q2, q_free, qNm2, qNm1, qN];
-
-    c = [];   % Inequality constraints: c(x) <= 0
-    ceq = []; % Equality constraints: ceq(x) = 0
-
-    % =====================================================================
-    % VELOCITY CONSTRAINTS
-    % For B-splines, velocity control points are: v_i = p/(t_{i+p+1} - t_{i+1}) * (q_{i+1} - q_i)
-    % We require: -v_max <= v_i <= v_max (per axis)
-    % =====================================================================
-    for i = 3:N  % Start at 3 because v0, v1 are determined by initial conditions
-        ci = p / (knots(i+p+1) - knots(i+1));
-        v_i = ci * (q(:, i+1) - q(:, i));
-
-        c = [c; v_i - v_max];      % v_i <= v_max
-        c = [c; -v_i - v_max];     % v_i >= -v_max (i.e., -v_i <= v_max)
-    end
-
-    % =====================================================================
-    % ACCELERATION CONSTRAINTS
-    % a_i = (p-1)/(t_{i+p+1} - t_{i+2}) * (v_{i+1} - v_i)
-    % We require: -a_max <= a_i <= a_max
-    % =====================================================================
-    for i = 2:N-2  % a_0 determined by initial conditions
-        c1 = p / (knots(i+p+1) - knots(i+1));
-        c2 = p / (knots(i+p+2) - knots(i+2));
-        c3 = (p - 1) / (knots(i+p+1) - knots(i+2));
-
-        v_i = c1 * (q(:, i+1) - q(:, i));
-        v_iP1 = c2 * (q(:, i+2) - q(:, i+1));
-        a_i = c3 * (v_iP1 - v_i);
-
-        c = [c; a_i - a_max];
-        c = [c; -a_i - a_max];
-    end
-
-    % =====================================================================
-    % JERK CONSTRAINTS
-    % Jerk is constant within each segment (cubic polynomial)
-    % j_i = 6 * (leading coeff) / deltaT^3
-    % =====================================================================
-    tmp = [6; 0; 0; 0] / (deltaT^3);
-    for i = 1:num_segments
-        Qi = q(:, i:i+3);
-        A_i_times_tmp = A_pos_bs * tmp;
-
-        for axis = 1:3
-            j_i = Qi(axis, :) * A_i_times_tmp;
-            c = [c; j_i - j_max(axis)];
-            c = [c; -j_i - j_max(axis)];
-        end
-    end
-
-    % =====================================================================
-    % SPHERE CONSTRAINT (Planning Horizon)
-    % All FREE control points must be within Ra of the start position q0
-    % This ensures the trajectory stays within the local planning region
-    % =====================================================================
-    for i = 4:(N+1-3)  % Indices of free control points (1-indexed)
-        dist_sq = sum((q(:, i) - q0).^2);  % squared distance
-        c = [c; dist_sq - Ra^2];           % dist^2 <= Ra^2
+    if exist('gurobi_setup', 'file') == 2
+        gurobi_setup;
     end
 end
+if exist('gurobi', 'file') == 0
+    error('Gurobi MATLAB API not found. Run init or gurobi_setup first.');
+end
 
-%% 11. Initialize and Solve
 % Initial guess: linear interpolation between q2 and qN-2
 x0 = [];
 for i = 1:num_free_cps
@@ -336,36 +184,31 @@ for i = 1:num_free_cps
     x0 = [x0; q_init];
 end
 
-% Optimization options
-options = optimoptions('fmincon', ...
-    'Display', 'iter', ...
-    'Algorithm', 'sqp', ...
-    'MaxFunctionEvaluations', 10000, ...
-    'MaxIterations', 500, ...
-    'OptimalityTolerance', 1e-6, ...
-    'StepTolerance', 1e-8);
+model = buildGurobiModel(q0, q1, q2, qNm2, qNm1, qN, ...
+    knots, N, p, num_segments, params.v_max, params.a_max, params.j_max, ...
+    params.Ra, deltaT, A_pos_bs);
+model.start = x0;
 
-% Create function handles
-objFun = @(x) objectiveFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
-                                N, num_segments, A_pos_bs_rest, deltaT, params.weight, pf);
+params_gurobi = struct();
+params_gurobi.OutputFlag = 1;
 
-conFun = @(x) constraintFunction(x, q0, q1, q2, qNm2, qNm1, qN, ...
-                                  knots, N, p, num_segments, ...
-                                  params.v_max, params.a_max, params.j_max, ...
-                                  params.Ra, deltaT, A_pos_bs_rest);
-
-% Solve
-fprintf('Starting optimization...\n');
+fprintf('Starting optimization with Gurobi...\n');
 tic;
-[x_opt, fval, exitflag, output] = fmincon(objFun, x0, [], [], [], [], [], [], conFun, options);
+result = gurobi(model, params_gurobi);
 opt_time = toc;
 
-fprintf('\nOptimization completed in %.3f seconds\n', opt_time);
-fprintf('Exit flag: %d (%s)\n', exitflag, getExitFlagMessage(exitflag));
-fprintf('Final cost: %.4f\n', fval);
-fprintf('Iterations: %d\n\n', output.iterations);
+if ~isfield(result, 'x')
+    error('Gurobi failed (status: %s).', result.status);
+end
 
-%% 12. Extract Solution
+x_opt = result.x;
+fval = result.objval;
+
+fprintf('\nOptimization completed in %.3f seconds\n', opt_time);
+fprintf('Status: %s\n', result.status);
+fprintf('Final cost: %.4f\n\n', fval);
+
+%% 10. Extract Solution
 num_free = length(x_opt) / 3;
 q_free_opt = reshape(x_opt, 3, num_free);
 q_opt = [q0, q1, q2, q_free_opt, qNm2, qNm1, qN];
@@ -378,9 +221,9 @@ for i = 1:size(q_opt, 2)
         dist_from_start, conditional(in_sphere, '', ' OUTSIDE Ra!'));
 end
 
-%% 13. Convert to Piecewise Polynomial and Sample
+%% 11. Convert to Piecewise Polynomial and Sample
 pwp = struct();
-pwp.times = knots(p+1:end-p);  % Active knot span
+pwp.times = knots(p+1:end-p);
 pwp.coeff_x = zeros(num_segments, 4);
 pwp.coeff_y = zeros(num_segments, 4);
 pwp.coeff_z = zeros(num_segments, 4);
@@ -395,7 +238,6 @@ for seg = 1:num_segments
     pwp.coeff_z(seg, :) = flip(M_bspline * cps_z)';
 end
 
-% Sample trajectory
 t_samples = t_init:params.dc:t_final;
 trajectory = zeros(3, length(t_samples));
 velocity = zeros(3, length(t_samples));
@@ -405,37 +247,24 @@ for i = 1:length(t_samples)
     [trajectory(:, i), velocity(:, i), acceleration(:, i)] = evalPwpFull(pwp, t_samples(i));
 end
 
-%% 14. Visualization
+%% 12. Visualization
 figure('Position', [50, 50, 1500, 800]);
 
-% 3D Trajectory
 subplot(2, 3, 1);
 hold on;
-
-% Plot trajectory
 plot3(trajectory(1,:), trajectory(2,:), trajectory(3,:), 'b-', 'LineWidth', 2.5);
-
-% Plot control points
 plot3(q_opt(1,:), q_opt(2,:), q_opt(3,:), 'ro-', 'MarkerSize', 8, 'MarkerFaceColor', 'r');
-
-% Plot start
 plot3(initial_state.pos(1), initial_state.pos(2), initial_state.pos(3), ...
     'gs', 'MarkerSize', 15, 'MarkerFaceColor', 'g', 'LineWidth', 2);
-
-% Plot intermediate goal (target for this iteration)
 plot3(target_goal(1), target_goal(2), target_goal(3), ...
     'mp', 'MarkerSize', 15, 'MarkerFaceColor', 'm', 'LineWidth', 2);
-
-% Plot final goal (if different from target)
 if ~isequal(target_goal, final_goal)
     plot3(final_goal(1), final_goal(2), final_goal(3), ...
         'c^', 'MarkerSize', 12, 'MarkerFaceColor', 'c', 'LineWidth', 2);
-    % Draw line from intermediate to final goal
     plot3([target_goal(1), final_goal(1)], [target_goal(2), final_goal(2)], ...
         [target_goal(3), final_goal(3)], 'c--', 'LineWidth', 1);
 end
 
-% Draw planning sphere
 [sx, sy, sz] = sphere(30);
 surf(params.Ra*sx + q0(1), params.Ra*sy + q0(2), params.Ra*sz + q0(3), ...
     'FaceAlpha', 0.1, 'EdgeColor', 'c', 'EdgeAlpha', 0.3, 'FaceColor', 'cyan');
@@ -450,7 +279,6 @@ else
 end
 grid on; axis equal; view(45, 25);
 
-% Position vs Time
 subplot(2, 3, 2);
 plot(t_samples, trajectory(1,:), 'r-', 'LineWidth', 1.5); hold on;
 plot(t_samples, trajectory(2,:), 'g-', 'LineWidth', 1.5);
@@ -460,7 +288,6 @@ title('Position vs Time');
 legend('X', 'Y', 'Z', 'Location', 'best');
 grid on;
 
-% Velocity vs Time
 subplot(2, 3, 3);
 plot(t_samples, velocity(1,:), 'r-', 'LineWidth', 1.5); hold on;
 plot(t_samples, velocity(2,:), 'g-', 'LineWidth', 1.5);
@@ -472,7 +299,6 @@ title('Velocity vs Time');
 legend('Vx', 'Vy', 'Vz', 'v_{max}', 'Location', 'best');
 grid on;
 
-% Acceleration vs Time
 subplot(2, 3, 4);
 plot(t_samples, acceleration(1,:), 'r-', 'LineWidth', 1.5); hold on;
 plot(t_samples, acceleration(2,:), 'g-', 'LineWidth', 1.5);
@@ -484,7 +310,6 @@ title('Acceleration vs Time');
 legend('Ax', 'Ay', 'Az', 'a_{max}', 'Location', 'best');
 grid on;
 
-% Distance from start (verify sphere constraint)
 subplot(2, 3, 5);
 dist_from_start = vecnorm(trajectory - q0);
 plot(t_samples, dist_from_start, 'b-', 'LineWidth', 2);
@@ -494,8 +319,7 @@ title('Sphere Constraint Verification');
 legend('Trajectory Distance', 'Ra (Planning Radius)', 'Location', 'best');
 grid on;
 
-% Verify trajectory stays within Ra
-if max(dist_from_start) <= params.Ra * 1.01  % 1% tolerance
+if max(dist_from_start) <= params.Ra * 1.01
     text(t_final/2, params.Ra*0.5, 'CONSTRAINT SATISFIED', ...
         'Color', 'g', 'FontWeight', 'bold', 'FontSize', 12, 'HorizontalAlignment', 'center');
 else
@@ -503,7 +327,6 @@ else
         'Color', 'r', 'FontWeight', 'bold', 'FontSize', 12, 'HorizontalAlignment', 'center');
 end
 
-% Top-down view
 subplot(2, 3, 6);
 hold on;
 plot(trajectory(1,:), trajectory(2,:), 'b-', 'LineWidth', 2.5);
@@ -513,16 +336,15 @@ plot(target_goal(1), target_goal(2), 'mp', 'MarkerSize', 15, 'MarkerFaceColor', 
 if ~isequal(target_goal, final_goal)
     plot(final_goal(1), final_goal(2), 'c^', 'MarkerSize', 12, 'MarkerFaceColor', 'c');
 end
-% Planning circle
 theta = linspace(0, 2*pi, 100);
 plot(params.Ra*cos(theta) + q0(1), params.Ra*sin(theta) + q0(2), 'c-', 'LineWidth', 2);
 xlabel('X [m]'); ylabel('Y [m]');
 title('Top-Down View (X-Y)');
 grid on; axis equal;
 
-sgtitle(sprintf('MADER Trajectory Optimization - %s Goal (Example 2)', goal_type), 'FontSize', 14);
+sgtitle(sprintf('MADER Trajectory Optimization - %s Goal (Example 2, Gurobi)', goal_type), 'FontSize', 14);
 
-%% 15. Verify Constraints
+%% 13. Verify Constraints
 fprintf('\n=== Constraint Verification ===\n');
 fprintf('Velocity:\n');
 fprintf('  Max |Vx|: %.3f m/s (limit: %.1f)\n', max(abs(velocity(1,:))), params.v_max(1));
@@ -542,6 +364,134 @@ fprintf('Target goal:    [%.3f, %.3f, %.3f]\n', target_goal);
 fprintf('Distance to target: %.4f m\n', norm(trajectory(:, end) - target_goal));
 
 %% Helper Functions
+
+function model = buildGurobiModel(q0, q1, q2, qNm2, qNm1, qN, ...
+    knots, N, p, num_segments, v_max, a_max, j_max, Ra, deltaT, A_pos_bs)
+    free_indices = 4:(N-2);
+    num_free_cps = numel(free_indices);
+    nvar = 3 * num_free_cps;
+
+    free_map = zeros(1, N + 1);
+    free_map(free_indices) = 1:num_free_cps;
+
+    q_fixed = nan(3, N + 1);
+    q_fixed(:, 1) = q0;
+    q_fixed(:, 2) = q1;
+    q_fixed(:, 3) = q2;
+    q_fixed(:, N-1) = qNm2;
+    q_fixed(:, N) = qNm1;
+    q_fixed(:, N+1) = qN;
+
+    A = zeros(0, nvar);
+    rhs = zeros(0, 1);
+
+    % Velocity constraints
+    for i = 3:N
+        ci = p / (knots(i+p+1) - knots(i+1));
+        for axis = 1:3
+            [row, cst] = linDiff(axis, i+1, i, ci, free_map, q_fixed, nvar);
+            [A, rhs] = addLeq(A, rhs, row, v_max(axis) - cst);
+            [A, rhs] = addLeq(A, rhs, -row, v_max(axis) + cst);
+        end
+    end
+
+    % Acceleration constraints
+    for i = 2:N-2
+        c1 = p / (knots(i+p+1) - knots(i+1));
+        c2 = p / (knots(i+p+2) - knots(i+2));
+        c3 = (p - 1) / (knots(i+p+1) - knots(i+2));
+        for axis = 1:3
+            [row1, cst1] = linDiff(axis, i+2, i+1, c2, free_map, q_fixed, nvar);
+            [row0, cst0] = linDiff(axis, i+1, i, c1, free_map, q_fixed, nvar);
+            row = c3 * (row1 - row0);
+            cst = c3 * (cst1 - cst0);
+            [A, rhs] = addLeq(A, rhs, row, a_max(axis) - cst);
+            [A, rhs] = addLeq(A, rhs, -row, a_max(axis) + cst);
+        end
+    end
+
+    % Jerk constraints
+    tmp = [6; 0; 0; 0] / (deltaT^3);
+    weights = (A_pos_bs * tmp).';
+    for i = 1:num_segments
+        for axis = 1:3
+            [row, cst] = linCombo(axis, i:(i+3), weights, free_map, q_fixed, nvar);
+            [A, rhs] = addLeq(A, rhs, row, j_max(axis) - cst);
+            [A, rhs] = addLeq(A, rhs, -row, j_max(axis) + cst);
+        end
+    end
+
+    % Objective: sum of squared jerk (same as solver_gurobi.cpp)
+    Q = zeros(nvar, nvar);
+    c = zeros(nvar, 1);
+    tmp = [6; 0; 0; 0];
+    weights = (A_pos_bs * tmp).';
+    for i = 1:num_segments
+        for axis = 1:3
+            [row, cst] = linCombo(axis, i:(i+3), weights, free_map, q_fixed, nvar);
+            Q = Q + 2 * (row' * row);
+            c = c + 2 * cst * row';
+        end
+    end
+
+    % Sphere constraints: ||q_i - q0||^2 <= Ra^2 for free control points
+    qc = struct('Qc', {}, 'q', {}, 'rhs', {}, 'sense', {});
+    for idx = free_indices
+        slot = free_map(idx);
+        var_idx = (slot - 1) * 3 + (1:3);
+        Qc = sparse(var_idx, var_idx, 1, nvar, nvar);
+        q = zeros(nvar, 1);
+        q(var_idx) = -2 * q0;
+        rhs_q = Ra^2 - sum(q0.^2);
+        qc(end+1) = struct('Qc', Qc, 'q', q, 'rhs', rhs_q, 'sense', '<');
+    end
+
+    model = struct();
+    model.A = sparse(A);
+    model.rhs = rhs;
+    model.sense = repmat('<', size(A, 1), 1);
+    model.Q = sparse(Q);
+    model.obj = c;
+    model.modelsense = 'min';
+    model.lb = -inf(nvar, 1);
+    model.ub = inf(nvar, 1);
+    if ~isempty(qc)
+        model.quadcon = qc;
+    end
+end
+
+function [A, rhs] = addLeq(A, rhs, row, bound)
+    A(end+1, :) = row;
+    rhs(end+1, 1) = bound;
+end
+
+function [row, cst] = linDiff(axis, idx1, idx0, coeff, free_map, q_fixed, nvar)
+    [r1, c1] = cpExpr(axis, idx1, free_map, q_fixed, nvar);
+    [r0, c0] = cpExpr(axis, idx0, free_map, q_fixed, nvar);
+    row = coeff * (r1 - r0);
+    cst = coeff * (c1 - c0);
+end
+
+function [row, cst] = linCombo(axis, idxs, weights, free_map, q_fixed, nvar)
+    row = zeros(1, nvar);
+    cst = 0;
+    for k = 1:numel(idxs)
+        [r, c] = cpExpr(axis, idxs(k), free_map, q_fixed, nvar);
+        row = row + weights(k) * r;
+        cst = cst + weights(k) * c;
+    end
+end
+
+function [row, cst] = cpExpr(axis, idx, free_map, q_fixed, nvar)
+    row = zeros(1, nvar);
+    slot = free_map(idx);
+    if slot > 0
+        row((slot - 1) * 3 + axis) = 1;
+        cst = 0;
+    else
+        cst = q_fixed(axis, idx);
+    end
+end
 
 function [pos, vel, accel] = evalPwpFull(pwp, t)
     times = pwp.times;
@@ -566,16 +516,6 @@ function [pos, vel, accel] = evalPwpFull(pwp, t)
 
     ddu_vec = [6*u; 2; 0; 0];
     accel = [pwp.coeff_x(seg,:)*ddu_vec; pwp.coeff_y(seg,:)*ddu_vec; pwp.coeff_z(seg,:)*ddu_vec] / (delta_t^2);
-end
-
-function msg = getExitFlagMessage(flag)
-    switch flag
-        case 1, msg = 'Converged to solution';
-        case 0, msg = 'Max iterations reached';
-        case -1, msg = 'Stopped by output function';
-        case -2, msg = 'No feasible point found';
-        otherwise, msg = 'Unknown';
-    end
 end
 
 function s = conditional(cond, true_str, false_str)
